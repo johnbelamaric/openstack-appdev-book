@@ -1,0 +1,114 @@
+heat_template_version: 2014-10-16
+description: AutoScaling Web Application
+parameters:
+  network:
+    type: string
+    description: the network all of the servers will use
+  subnet_id:
+    type: string
+    description: the load balancer subnet
+  external_network_id:
+    type: string
+    description: the UUID of the external Neutron network
+resources:
+  web_server_group:
+    type: OS::Heat::AutoScalingGroup
+    properties:
+      min_size: 2
+      max_size: 5
+      resource:
+        type: web-server.yaml
+        properties:
+          pool_id: {get_resource: pool}
+          network: {get_param: network}
+          parent_stack_id: {get_param: "OS::stack_id"}
+  scaleup_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: web_server_group}
+      cooldown: 30
+      scaling_adjustment: 1
+  scaledown_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: web_server_group}
+      cooldown: 30
+      scaling_adjustment: -1
+  cpu_alarm_high:
+    type: OS::Ceilometer::Alarm
+    properties:
+      description: If the avg CPU > 40% for 30 seconds then scale up
+      meter_name: cpu_util
+      statistic: avg
+      period: 30
+      evaluation_periods: 1
+      threshold: 40
+      alarm_actions:
+        - {get_attr: [scaleup_policy, alarm_url]}
+      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+      comparison_operator: gt
+  cpu_alarm_low:
+    type: OS::Ceilometer::Alarm
+    properties:
+      description: If the avg CPU < 15% for 90 seconds then scale down
+      meter_name: cpu_util
+      statistic: avg
+      period: 90
+      evaluation_periods: 1
+      threshold: 15
+      alarm_actions:
+        - {get_attr: [scaledown_policy, alarm_url]}
+      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+      comparison_operator: lt
+  monitor:
+    type: OS::Neutron::HealthMonitor
+    properties:
+      type: TCP
+      delay: 5
+      max_retries: 5
+      timeout: 5
+  pool:
+    type: OS::Neutron::Pool
+    properties:
+      protocol: HTTP
+      monitors: [{get_resource: monitor}]
+      subnet_id: {get_param: subnet_id}
+      lb_method: ROUND_ROBIN
+      vip:
+        protocol_port: 80
+  lb:
+    type: OS::Neutron::LoadBalancer
+    properties:
+      protocol_port: 80
+      pool_id: {get_resource: pool}
+
+  lb_floating:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: {get_param: external_network_id}
+      port_id: {get_attr: [pool, vip, port_id]}
+
+outputs:
+  scale_up_url:
+    description: >
+      Invoke the scale-up operation by doing an HTTP POST to this
+      URL;
+    value: {get_attr: [scaleup_policy, alarm_url]}
+  scale_dn_url:
+    description: >
+      Invoke the scale-down operation by doing an HTTP POST to
+      this URL;
+    value: {get_attr: [scaledown_policy, alarm_url]}
+  pool_ip_address:
+    value: {get_attr: [pool, vip, address]}
+    description: The IP address of the load balancing pool
+  website_url:
+    value:
+      str_replace:
+        template: http://host/
+        params:
+          host: { get_attr: [lb_floating, floating_ip_address] }
+    description: >
+      This URL is the "external" load balanced url

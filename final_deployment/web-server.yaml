@@ -1,0 +1,66 @@
+heat_template_version: 2014-10-16
+description: Simple Web Server + Load Balancer Member
+parameters:
+  network:
+    type: string
+    description: the network all of the servers will use
+  pool_id:
+    type: string
+    description: the load balancer pool
+  parent_stack_id:
+    type: string
+    description: the stack ID of the calling stack
+resources:
+  server:
+    type: OS::Nova::Server
+    properties:
+      flavor: m1.tiny
+      image: cirros-0.3.4-x86_64-uec
+      key_name: my_key
+      metadata: {"metering.stack": {get_param: parent_stack_id}}
+      networks: [{network: {get_param: network} }]
+      user_data_format: RAW
+      user_data: |
+        #!/bin/sh
+  
+        # A tiny HTTP server that responds with the IP address of the server.
+  
+        IP=`ip -f inet addr | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d / -f 1`
+        LENGTH=`echo x$IP | wc -c`
+        cat > /tmp/http-response <<EOF
+        HTTP/1.0 200 OK
+        Content-Type: text/plain
+        Content-Length: $LENGTH
+  
+        $IP
+        EOF
+  
+        unix2dos /tmp/http-response
+        nohup nc -p 80 -s $IP -n -lk -e cat /tmp/http-response &
+  
+        # now, let's add some load to trigger CPU alarms
+        # find a number of seconds to burn based upon IP address
+        # this way different ones will burn CPU at different times
+        # 60, 180, 300, 420 seconds at a time
+        # then sleep 120s
+        SECONDS=`echo $IP | awk -F . '{print 60 + $4 % 4 * 120}'`
+        cat > /tmp/load.sh <<EOF
+        #!/bin/sh
+  
+        while [ 1 ]
+        do
+        if [ "0" -eq \`echo | awk '{print systime() % $SECONDS}'\` ]; then
+          sleep 120
+        fi
+        done
+        EOF
+        chmod 777 /tmp/load.sh
+        # cirros does something weird to /bin/sh so we need something else to run us
+        # later - and there is no "at"
+        nohup watch -t /tmp/load.sh &
+  member:
+    type: OS::Neutron::PoolMember
+    properties:
+      pool_id: {get_param: pool_id}
+      address: {get_attr: [server, first_address]}
+      protocol_port: 80
